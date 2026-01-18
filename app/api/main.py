@@ -20,6 +20,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
+import asyncio
 from app.api.job_manager import JobManager
 from app.ingestion.s2_client import S2Client
 from app.ingestion.sentinel1_rtc import S1RTCClient
@@ -30,6 +31,15 @@ from app.reporting.kml_gen import generate_kml
 from app.reporting.summary_gen import generate_mobile_summary
 
 app = FastAPI()
+scheduler = MissionScheduler()
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(scheduler.start())
+
+@app.on_event("shutdown")
+def shutdown_event():
+    scheduler.stop()
 
 # Add CORS
 app.add_middleware(
@@ -287,6 +297,7 @@ async def launch_mission(request: MissionRequest, background_tasks: BackgroundTa
         "start_date": request.start_date,
         "end_date": request.end_date,
         "bbox": bbox_list,
+        "recurrence": request.recurrence,
         "preview_url": search_results.get("preview_url"),
         "search_results": search_results, # Store full search results
         "tag": tag

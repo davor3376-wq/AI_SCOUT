@@ -53,7 +53,7 @@ def process_scene(filepath: str, requested_indices=None):
 
     with rasterio.open(filepath) as src:
         # Check band count
-        # We expect at least 3 bands: B04, B08, SCL
+        # We expect at least 3 bands for legacy, 5 for new (B03, B04, B08, SCL, QA60)
         if src.count < 3:
             logger.error(f"File {filename} has insufficient bands ({src.count}). Expected at least 3.")
             return []
@@ -81,6 +81,10 @@ def process_scene(filepath: str, requested_indices=None):
 
         # Generate Cloud Mask
         cloud_mask = get_cloud_mask(scl)
+
+        if qa60 is not None:
+            qa60_mask = get_cloud_mask_from_qa60(qa60)
+            cloud_mask = cloud_mask | qa60_mask
         cloud_cover_pct = calculate_cloud_coverage(cloud_mask)
         logger.info(f"Cloud Cover: {cloud_cover_pct:.2f}%")
 

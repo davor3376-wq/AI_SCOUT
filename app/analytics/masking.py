@@ -43,6 +43,20 @@ def get_cloud_mask(scl: np.ndarray) -> np.ndarray:
 
     return mask
 
+def get_cloud_mask_from_qa60(qa60: np.ndarray) -> np.ndarray:
+    """
+    Generates a boolean mask from the QA60 band.
+
+    Bit 10: Opaque clouds (1024)
+    Bit 11: Cirrus clouds (2048)
+    """
+    # Check for bit 10 or bit 11
+    # We use bitwise AND
+    opaque_clouds = (qa60 & (1 << 10)) > 0
+    cirrus_clouds = (qa60 & (1 << 11)) > 0
+
+    return opaque_clouds | cirrus_clouds
+
 def calculate_cloud_coverage(mask: np.ndarray) -> float:
     """
     Calculates the percentage of masked pixels.
