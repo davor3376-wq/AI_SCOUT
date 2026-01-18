@@ -12,7 +12,7 @@
         .control-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
         input[type="date"] { width: 100%; padding: 8px; margin-bottom: 10px; }
-        button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; cursor: pointer; font-size: 16px; }
+        button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; cursor: pointer; font-size: 16px; margin-bottom: 10px; }
         button:hover { background: #0056b3; }
         #time-slider-container {
             position: absolute; bottom: 30px; left: 320px; right: 20px;
@@ -23,6 +23,25 @@
         #mission-status { margin-top: 20px; padding: 10px; border: 1px solid #ddd; background: #fff; min-height: 50px; }
         .preview-img { max-width: 100%; margin-top: 10px; border: 1px solid #ccc; }
         #layer-control { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 10px; }
+
+        /* History Styles */
+        #history-list { list-style: none; padding: 0; margin-top: 10px; }
+        .history-item {
+            background: #fff; border: 1px solid #ddd; padding: 10px; margin-bottom: 5px; cursor: pointer;
+            border-radius: 4px; transition: background 0.2s;
+        }
+        .history-item:hover { background: #e9ecef; }
+        .history-item strong { display: block; color: #333; }
+        .history-item span { font-size: 0.8em; color: #666; }
+        .history-item.active { border-left: 5px solid #007bff; background: #eef; }
+        .status-badge { display: inline-block; padding: 2px 5px; border-radius: 3px; font-size: 0.7em; color: white; margin-top: 5px;}
+        .status-PENDING { background: #ffc107; color: #000; }
+        .status-RUNNING { background: #17a2b8; }
+        .status-COMPLETED { background: #28a745; }
+        .status-FAILED { background: #dc3545; }
+
+        #pdf-btn { background: #28a745; display: none; }
+        #pdf-btn:hover { background: #218838; }
     </style>
 </head>
 <body>
@@ -50,11 +69,20 @@
 
     <button id="launch-btn">Launch Mission</button>
 
-    <div id="mission-status">Status: Ready</div>
+    <div id="mission-status">
+        <strong>Status:</strong> <span id="status-text">Ready</span>
+        <br>
+        <div id="status-details"></div>
+        <button id="pdf-btn">Download PDF Report</button>
+    </div>
 
     <div id="layer-control">
         <label><input type="checkbox" id="toggle-processed" checked> Show Processed Layer</label>
     </div>
+
+    <hr>
+    <h3>Mission History</h3>
+    <ul id="history-list"></ul>
 </div>
 
 <div id="map"></div>
@@ -76,8 +104,8 @@
     }).addTo(map);
 
     // Add Processed Tile Layer
-    // Uses the new FastAPI endpoint
-    var processedLayer = L.tileLayer('/tiles/{z}/{x}/{y}', {
+    var tileUrlTemplate = '/tiles/{z}/{x}/{y}';
+    var processedLayer = L.tileLayer(tileUrlTemplate, {
         tms: false,
         opacity: 0.7,
         maxZoom: 18,
@@ -111,18 +139,105 @@
     map.addControl(drawControl);
 
     map.on(L.Draw.Event.CREATED, function (e) {
-        // Clear previous items for single AOI mission
         drawnItems.clearLayers();
         var layer = e.layer;
         drawnItems.addLayer(layer);
     });
 
-    // Default Dates (Last 30 days)
+    // Default Dates
     var today = new Date();
     var lastMonth = new Date();
     lastMonth.setDate(today.getDate() - 30);
     document.getElementById('end-date').valueAsDate = today;
     document.getElementById('start-date').valueAsDate = lastMonth;
+
+    var currentJobId = null;
+
+    // Load History
+    async function loadHistory() {
+        try {
+            const res = await fetch('/jobs');
+            const jobs = await res.json();
+            const list = document.getElementById('history-list');
+            list.innerHTML = '';
+            jobs.forEach(job => {
+                const li = document.createElement('li');
+                li.className = 'history-item';
+                if (job.id === currentJobId) li.classList.add('active');
+
+                li.innerHTML = `
+                    <strong>${job.id}</strong>
+                    <span>${job.created_at.split('T')[0]} - ${job.sensor}</span><br>
+                    <span class="status-badge status-${job.status}">${job.status}</span>
+                `;
+                li.onclick = () => selectJob(job.id);
+                list.appendChild(li);
+            });
+        } catch (e) {
+            console.error("Failed to load history", e);
+        }
+    }
+
+    async function selectJob(jobId) {
+        currentJobId = jobId;
+        loadHistory(); // Update active class
+
+        const statusText = document.getElementById('status-text');
+        const statusDetails = document.getElementById('status-details');
+        const pdfBtn = document.getElementById('pdf-btn');
+
+        statusText.innerText = "Loading Job...";
+        statusDetails.innerHTML = "";
+        pdfBtn.style.display = "none";
+
+        try {
+            const res = await fetch(`/jobs/${jobId}`);
+            if (!res.ok) throw new Error("Job not found");
+            const job = await res.json();
+
+            statusText.innerText = job.status;
+
+            // Show details
+            if (job.tag) statusDetails.innerHTML += `Tag: <b>${job.tag}</b><br>`;
+            if (job.error) statusDetails.innerHTML += `<span style="color:red">Error: ${job.error}</span><br>`;
+
+            // Zoom to AOI
+            if (job.bbox) {
+                 // bbox: [minx, miny, maxx, maxy]
+                 // fitBounds: [[miny, minx], [maxy, maxx]]
+                 map.fitBounds([[job.bbox[1], job.bbox[0]], [job.bbox[3], job.bbox[2]]]);
+            }
+
+            // Update Tile Layer
+            processedLayer.setUrl(`${tileUrlTemplate}?job_id=${jobId}`);
+
+            // PDF Button
+            if (job.status === "COMPLETED") {
+                pdfBtn.style.display = "block";
+                pdfBtn.onclick = () => {
+                    window.open(`/jobs/${jobId}/pdf`, '_blank');
+                };
+            }
+
+            // Preview (Search Results) on Map (Optional, maybe specific tile is better)
+            // If we have processed result, tile layer handles it.
+            // If pending, maybe show preview overlay?
+            if (job.status !== "COMPLETED" && job.preview_url) {
+                 // Show preview overlay if available
+                 if (currentOverlay) map.removeLayer(currentOverlay);
+                 // ... logic for preview overlay
+            }
+
+            // Setup slider if we have search results stored in job
+            if (job.search_results && job.search_results.results) {
+                 setupTimeSlider(job.search_results.results);
+            }
+
+        } catch (e) {
+            statusText.innerText = "Error loading job";
+            console.error(e);
+        }
+    }
 
     // Launch Mission Logic
     document.getElementById('launch-btn').addEventListener('click', async () => {
@@ -137,8 +252,10 @@
         }
         var geojson = layers[0].toGeoJSON();
 
-        var statusDiv = document.getElementById('mission-status');
-        statusDiv.innerHTML = "Status: Launching...";
+        var statusText = document.getElementById('status-text');
+        var statusDetails = document.getElementById('status-details');
+        statusText.innerText = "Launching...";
+        statusDetails.innerHTML = "";
 
         try {
             const response = await fetch('/launch_custom_mission', {
@@ -155,29 +272,21 @@
             if (!response.ok) throw new Error("Mission Failed");
 
             const result = await response.json();
-            statusDiv.innerHTML = `Status: Success!`;
-            if (result.tag) {
-                statusDiv.innerHTML += `<br>Tag: <b>${result.tag}</b>`;
-            }
-            if (result.tile_id) {
-                statusDiv.innerHTML += `<br>Tile ID: ${result.tile_id}`;
-            }
+            statusText.innerText = "Job Started";
+            statusDetails.innerHTML = `Job ID: ${result.job_id}<br>`;
+
+            if (result.tag) statusDetails.innerHTML += `Tag: <b>${result.tag}</b><br>`;
             if (result.preview_url) {
-                 statusDiv.innerHTML += `<br><a href="${result.preview_url}" target="_blank">View Preview</a>`;
+                 statusDetails.innerHTML += `<a href="${result.preview_url}" target="_blank">View Preview</a>`;
             }
 
-            // Refresh the tile layer to show new results if any
-            processedLayer.redraw();
-
-            if (result.results && result.results.length > 0) {
-                setupTimeSlider(result.results);
-            } else if (result.preview_url) {
-                // If single result, put it in list for slider
-                setupTimeSlider([{date: result.date || "Unknown", url: result.preview_url}]);
-            }
+            // Reload history and select new job
+            await loadHistory();
+            selectJob(result.job_id);
 
         } catch (error) {
-            statusDiv.innerHTML = `Status: Error - ${error.message}`;
+            statusText.innerText = "Error";
+            statusDetails.innerHTML = error.message;
         }
     });
 
@@ -187,6 +296,11 @@
         var slider = document.getElementById('time-slider');
         var container = document.getElementById('time-slider-container');
         var dateLabel = document.getElementById('current-date');
+
+        if (!results || results.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
 
         container.style.display = 'block';
         slider.max = results.length - 1;
@@ -201,23 +315,22 @@
              }
 
              if (item.bbox && item.preview_url) {
-                 // item.bbox is [minx, miny, maxx, maxy]
-                 // LatLngBounds: [[miny, minx], [maxy, maxx]]
                  var bounds = [[item.bbox[1], item.bbox[0]], [item.bbox[3], item.bbox[2]]];
                  currentOverlay = L.imageOverlay(item.preview_url, bounds).addTo(map);
-                 // Optional: fit bounds to the image
-                 // map.fitBounds(bounds);
-             } else {
-                 console.log("No bbox or preview url for item", item);
              }
         };
 
         slider.oninput = function() {
             updateMap(this.value);
         }
-
+        // Don't auto-show first one if we want to show processed tiles instead
+        // But useful for context.
         updateMap(0);
     }
+
+    // Initial Load
+    loadHistory();
+
 </script>
 </body>
 </html>
