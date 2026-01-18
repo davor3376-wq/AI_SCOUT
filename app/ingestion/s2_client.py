@@ -56,18 +56,19 @@ class S2Client:
         Returns:
             List of paths to downloaded files.
         """
-        # Evalscript for B04, B08, and SCL
+        # Evalscript for B04, B08, SCL, B03 (Green), B12 (SWIR)
+        # Added B03 and B12 to support NDWI and NBR
         evalscript = """
         //VERSION=3
         function setup() {
           return {
-            input: ["B04", "B08", "SCL"],
-            output: { bands: 3, sampleType: "UINT16" }
+            input: ["B04", "B08", "SCL", "B03", "B12"],
+            output: { bands: 5, sampleType: "UINT16" }
           };
         }
 
         function evaluatePixel(sample) {
-          return [sample.B04, sample.B08, sample.SCL];
+          return [sample.B04, sample.B08, sample.SCL, sample.B03, sample.B12];
         }
         """
 
