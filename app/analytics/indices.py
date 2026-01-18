@@ -86,3 +86,42 @@ def calculate_ndwi(green: np.ndarray, nir: np.ndarray) -> np.ndarray:
     ndwi[~valid_mask] = np.nan
 
     return ndwi
+
+def calculate_nbr(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
+    """
+    Calculates the Normalized Burn Ratio (NBR).
+
+    NBR = (NIR - SWIR) / (NIR + SWIR)
+
+    Why: NBR is used to identify burned areas and assess burn severity.
+    It uses near-infrared (NIR) and shortwave-infrared (SWIR) bands.
+    Healthy vegetation has high NIR reflectance and low SWIR reflectance.
+    Burned areas have low NIR and high SWIR reflectance.
+
+    Args:
+        nir: Near-Infrared band array (e.g., B08).
+        swir: Shortwave-Infrared band array (e.g., B12).
+
+    Returns:
+        Numpy array containing NBR values (float32), ranging from -1.0 to 1.0.
+    """
+    # Ensure inputs are float
+    nir_f = nir.astype(np.float32)
+    swir_f = swir.astype(np.float32)
+
+    numerator = nir_f - swir_f
+    denominator = nir_f + swir_f
+
+    # Initialize result
+    nbr = np.zeros_like(numerator)
+
+    # Avoid division by zero
+    valid_mask = denominator != 0
+
+    # Perform division
+    nbr[valid_mask] = numerator[valid_mask] / denominator[valid_mask]
+
+    # Handle invalid pixels
+    nbr[~valid_mask] = np.nan
+
+    return nbr

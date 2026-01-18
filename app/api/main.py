@@ -22,6 +22,7 @@ import matplotlib.colors as mcolors
 
 from app.api.job_manager import JobManager
 from app.ingestion.s2_client import S2Client
+from app.ingestion.sentinel1_rtc import S1RTCClient
 from app.analytics import processor
 from app.reporting.pdf_gen import PDFReportGenerator
 
@@ -40,7 +41,7 @@ class MissionRequest(BaseModel):
     geometry: Dict[str, Any]
     start_date: str
     end_date: str
-    sensor: str # "OPTICAL" or "RADAR"
+    sensor: str # "OPTICAL", "RADAR", "NDVI", "NDWI", "NBR"
 
 def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: str):
     """
@@ -52,20 +53,38 @@ def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: 
     try:
         # 1. Download (Ingestion)
         raw_files = []
-        if sensor == "OPTICAL":
+        requested_indices = None
+
+        # Determine ingestion client and requested indices
+        if sensor in ["OPTICAL", "NDVI", "NDWI", "NBR"]:
             client = S2Client()
             # download_data is blocking
             raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+
+            # If sensor implies a specific index, set requested_indices
+            if sensor == "OPTICAL":
+                requested_indices = ["NDVI", "NDWI", "NBR"] # All
+            else:
+                requested_indices = [sensor]
+
+        elif sensor == "RADAR" or sensor == "S1_RTC":
+            client = S1RTCClient()
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+            requested_indices = [] # No analytics for S1 yet
+
         else:
-            # Placeholder for RADAR or other sensors
-            pass
+            # Default to S2 if unknown
+            client = S2Client()
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+            requested_indices = ["NDVI"]
 
         if not raw_files:
             jm.update_job_status(job_id, "FAILED", error="No data downloaded (or sensor not supported for processing)")
             return
 
         # 2. Process (Analytics)
-        processed_files = processor.run(input_files=raw_files)
+        # S1 files are just passed through as 'processed' effectively in the current processor logic if we pass them
+        processed_files = processor.run(input_files=raw_files, requested_indices=requested_indices)
 
         if not processed_files:
              jm.update_job_status(job_id, "FAILED", error="No data processed (Analytics produced no output)")
