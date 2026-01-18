@@ -24,6 +24,8 @@ from app.api.job_manager import JobManager
 from app.ingestion.s2_client import S2Client
 from app.analytics import processor
 from app.reporting.pdf_gen import PDFReportGenerator
+from app.reporting.kml_gen import generate_kml
+from app.reporting.summary_gen import generate_mobile_summary
 
 app = FastAPI()
 
@@ -72,10 +74,17 @@ def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: 
              return
 
         # 3. Report (Reporting)
+        # KML
+        kml_path = generate_kml(job_id, bbox, output_dir="results")
+
+        # Mobile Summary
+        mobile_summary_path = generate_mobile_summary(processed_files, output_dir="results", job_id=job_id)
+
+        # PDF
         report_name = f"Evidence_Pack_{job_id}.pdf"
         pdf_gen = PDFReportGenerator()
         # generate_pdf is blocking
-        pdf_gen.generate_pdf(filename=report_name, specific_files=processed_files)
+        pdf_gen.generate_pdf(filename=report_name, specific_files=processed_files, bbox=bbox)
 
         report_path = os.path.join("results", report_name)
 
@@ -83,7 +92,9 @@ def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: 
         results = {
             "raw_files": raw_files,
             "processed_files": processed_files,
-            "pdf_report": report_path
+            "pdf_report": report_path,
+            "kml_export": kml_path,
+            "mobile_summary": mobile_summary_path
         }
         jm.update_job_status(job_id, "COMPLETED", results=results)
 
