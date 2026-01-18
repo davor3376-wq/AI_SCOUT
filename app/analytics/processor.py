@@ -23,6 +23,7 @@ def process_scene(filepath: str):
     """
     Processes a single raw Sentinel-2 TIF file.
     Calculates NDVI (and NDWI if possible) and saves the results.
+    Returns a list of generated output file paths.
     """
     filename = os.path.basename(filepath)
     # Expected format: {date}_{sensor}_{tile_id}.tif
@@ -30,7 +31,7 @@ def process_scene(filepath: str):
     parts = filename.replace(".tif", "").split("_")
     if len(parts) < 3:
         logger.warning(f"Skipping file with unexpected name format: {filename}")
-        return
+        return []
 
     date_str = parts[0]
     sensor = parts[1]
@@ -38,16 +39,18 @@ def process_scene(filepath: str):
 
     if sensor != "S2":
         logger.info(f"Skipping non-S2 file: {filename}")
-        return
+        return []
 
     logger.info(f"Processing {filename}...")
+
+    generated_files = []
 
     with rasterio.open(filepath) as src:
         # Check band count
         # We expect at least 3 bands: B04, B08, SCL
         if src.count < 3:
             logger.error(f"File {filename} has insufficient bands ({src.count}). Expected at least 3.")
-            return
+            return []
 
         # Read bands
         # Note: rasterio is 1-indexed
@@ -107,6 +110,7 @@ def process_scene(filepath: str):
 def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
     """
     Saves the calculated index to a GeoTIFF.
+    Returns the path to the saved file.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -138,21 +142,32 @@ def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
         logger.error(f"Failed to save {output_path}: {e}")
         return None
 
-def run():
+def run(input_files=None):
     """
-    Main entry point to process all files.
+    Main entry point to process files.
+    Args:
+        input_files (list): Optional list of specific file paths to process.
+                            If None, processes all .tif files in data/raw.
+    Returns:
+        list: List of paths to the processed output files.
     """
-    if not os.path.exists(INPUT_DIR):
-        logger.warning(f"Input directory {INPUT_DIR} does not exist.")
-        return
+    if input_files is None:
+        if not os.path.exists(INPUT_DIR):
+            logger.warning(f"Input directory {INPUT_DIR} does not exist.")
+            return []
+        input_files = glob.glob(os.path.join(INPUT_DIR, "*.tif"))
 
-    files = glob.glob(os.path.join(INPUT_DIR, "*.tif"))
-    if not files:
-        logger.warning(f"No TIF files found in {INPUT_DIR}")
-        return
+    if not input_files:
+        logger.warning(f"No TIF files found to process.")
+        return []
 
-    for filepath in files:
-        process_scene(filepath)
+    output_files = []
+    for filepath in input_files:
+        result = process_scene(filepath)
+        if result:
+            output_files.extend(result)
+
+    return output_files
 
 if __name__ == "__main__":
     run()
