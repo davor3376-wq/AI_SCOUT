@@ -13,3 +13,5 @@ numpy
 pillow
 reportlab
 matplotlib
+simplekml
+qrcode

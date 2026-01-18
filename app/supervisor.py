@@ -155,7 +155,8 @@ async def supervisor_main():
                 await asyncio.to_thread(
                     pdf_gen.generate_pdf,
                     filename=report_name,
-                    specific_files=processed_files
+                    specific_files=processed_files,
+                    bbox=bbox
                 )
             except Exception as e:
                 logger.error(f"Gamma failed: {e}")
