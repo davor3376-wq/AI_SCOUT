@@ -22,6 +22,7 @@
         #time-slider { width: 100%; }
         #mission-status { margin-top: 20px; padding: 10px; border: 1px solid #ddd; background: #fff; min-height: 50px; }
         .preview-img { max-width: 100%; margin-top: 10px; border: 1px solid #ccc; }
+        #layer-control { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 10px; }
     </style>
 </head>
 <body>
@@ -50,6 +51,10 @@
     <button id="launch-btn">Launch Mission</button>
 
     <div id="mission-status">Status: Ready</div>
+
+    <div id="layer-control">
+        <label><input type="checkbox" id="toggle-processed" checked> Show Processed Layer</label>
+    </div>
 </div>
 
 <div id="map"></div>
@@ -69,6 +74,23 @@
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
+
+    // Add Processed Tile Layer
+    // Uses the new FastAPI endpoint
+    var processedLayer = L.tileLayer('/tiles/{z}/{x}/{y}', {
+        tms: false,
+        opacity: 0.7,
+        maxZoom: 18,
+        attribution: 'Project Gaia'
+    }).addTo(map);
+
+    document.getElementById('toggle-processed').addEventListener('change', function(e) {
+        if (e.target.checked) {
+            processedLayer.addTo(map);
+        } else {
+            map.removeLayer(processedLayer);
+        }
+    });
 
     // Initialize Draw Control
     var drawnItems = new L.FeatureGroup();
@@ -143,6 +165,9 @@
             if (result.preview_url) {
                  statusDiv.innerHTML += `<br><a href="${result.preview_url}" target="_blank">View Preview</a>`;
             }
+
+            // Refresh the tile layer to show new results if any
+            processedLayer.redraw();
 
             if (result.results && result.results.length > 0) {
                 setupTimeSlider(result.results);

@@ -1,12 +1,33 @@
 import os
+import io
+import glob
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentinelhub import SentinelHubCatalog, BBox, CRS, DataCollection
 from app.ingestion.auth import SentinelHubAuth
+import mercantile
+import rasterio
+from rasterio.warp import reproject
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 app = FastAPI()
+
+# Add CORS to be safe
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class MissionRequest(BaseModel):
     geometry: Dict[str, Any]
@@ -134,3 +155,134 @@ async def launch_mission(request: MissionRequest):
             "results": results,
             "bbox": items[0].get("bbox")
         }
+
+
+@app.get("/tiles/{z}/{x}/{y}")
+async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
+    """
+    Serves a 256x256 PNG tile for the requested Web Mercator tile (z, x, y).
+    Looks for the latest .tif in results/ or data/processed/.
+    """
+
+    # Locate the TIF file
+    tif_path = None
+
+    if file:
+        # Check explicit path in both dirs
+        safe_filename = os.path.basename(file)
+        p1 = os.path.join("results", safe_filename)
+        p2 = os.path.join("data", "processed", safe_filename)
+        if os.path.exists(p1):
+            tif_path = p1
+        elif os.path.exists(p2):
+            tif_path = p2
+    else:
+        # Find latest TIF
+        search_paths = [
+            os.path.join("results", "*.tif"),
+            os.path.join("data", "processed", "*.tif")
+        ]
+        candidates = []
+        for sp in search_paths:
+            candidates.extend(glob.glob(sp))
+
+        if candidates:
+            # Sort by modification time
+            candidates.sort(key=os.path.getmtime, reverse=True)
+            tif_path = candidates[0]
+
+    if not tif_path:
+        # Return empty/transparent tile if no data found?
+        # Or 404. 404 is better for debugging.
+        raise HTTPException(status_code=404, detail="No processed data found.")
+
+    # Calculate tile bounds in EPSG:3857
+    bounds = mercantile.xy_bounds(x, y, z)
+    left, bottom, right, top = bounds.left, bounds.bottom, bounds.right, bounds.top
+
+    try:
+        with rasterio.open(tif_path) as src:
+            # Prepare destination
+            dst_transform = from_bounds(left, bottom, right, top, 256, 256)
+            dst_crs = 'EPSG:3857'
+
+            data = np.full((src.count, 256, 256), np.nan, dtype=np.float32)
+
+            # Reproject
+            for i in range(src.count):
+                reproject(
+                    source=rasterio.band(src, i+1),
+                    destination=data[i],
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.bilinear
+                )
+
+            # If all data is NaN/nodata, return empty tile
+            if np.all(np.isnan(data)):
+                # Return transparent PNG
+                img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                return Response(content=buf.getvalue(), media_type="image/png")
+
+            # Visualization Logic
+            # If 1 band, apply colormap
+            if data.shape[0] == 1:
+                band = data[0]
+                # Normalize or clip? NDVI is -1 to 1.
+                # 'RdYlGn' colormap
+                # Normalize -1 to 1 to 0-1 for colormap
+                # But NDVI usually 0 to 1 for vegetation, <0 water/snow
+
+                norm = plt.Normalize(vmin=-0.2, vmax=1.0)
+                cmap = plt.get_cmap('RdYlGn')
+
+                # Apply colormap
+                colored = cmap(norm(band)) # Returns (256, 256, 4) float
+
+                # Handle NaNs (transparency)
+                mask = np.isnan(band)
+                colored[mask] = [0, 0, 0, 0] # Transparent
+
+                # Convert to UINT8
+                img_data = (colored * 255).astype(np.uint8)
+                img = Image.fromarray(img_data, 'RGBA')
+
+            elif data.shape[0] >= 3:
+                # RGB
+                img_data = np.moveaxis(data[:3], 0, -1)
+
+                # Check range and normalize if necessary
+                # If data is float (it is, per initialization) and values are small (<=1.0), scale them.
+                max_val = np.nanmax(img_data)
+                if max_val is not None and max_val <= 1.5:
+                     img_data = np.clip(img_data, 0.0, 1.0) * 255
+
+                img_data = np.nan_to_num(img_data).astype(np.uint8)
+
+                # Add alpha channel for transparency of [0,0,0] pixels
+                alpha = np.full((256, 256), 255, dtype=np.uint8)
+                mask = np.all(img_data == 0, axis=2)
+                alpha[mask] = 0
+
+                img_rgba = np.dstack((img_data, alpha))
+                img = Image.fromarray(img_rgba, 'RGBA')
+            else:
+                # Fallback
+                 img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            return Response(content=buf.getvalue(), media_type="image/png")
+
+    except Exception as e:
+        print(f"Tile Error: {e}")
+        # Return transparent on error or 500?
+        # Better transparent to not break map
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return Response(content=buf.getvalue(), media_type="image/png")
