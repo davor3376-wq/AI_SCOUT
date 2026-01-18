@@ -23,6 +23,7 @@ import matplotlib.colors as mcolors
 from app.api.job_manager import JobManager
 from app.ingestion.s2_client import S2Client
 from app.analytics import processor
+from app.analytics.chronos import AutoDifferencing, GifGenerator
 from app.reporting.pdf_gen import PDFReportGenerator
 
 app = FastAPI()
@@ -71,6 +72,40 @@ def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: 
              jm.update_job_status(job_id, "FAILED", error="No data processed (Analytics produced no output)")
              return
 
+        # --- CHRONOS ENGINE UPGRADE ---
+        gif_path = None
+        try:
+            # Auto-Differencing
+            diff_engine = AutoDifferencing()
+            # Convert BBox to list for comparison
+            bbox_list = [bbox.lower_left[0], bbox.lower_left[1], bbox.upper_right[0], bbox.upper_right[1]]
+
+            previous_job = diff_engine.find_previous_job(job_id, bbox_list, sensor)
+
+            if previous_job:
+                # Find NDVI files
+                prev_files = previous_job.get("results", {}).get("processed_files", [])
+                prev_ndvi = next((f for f in prev_files if "NDVI" in f), None)
+
+                curr_ndvi = next((f for f in processed_files if "NDVI" in f), None)
+
+                if prev_ndvi and curr_ndvi and os.path.exists(prev_ndvi):
+                    # Get date string from current file
+                    filename = os.path.basename(curr_ndvi)
+                    date_str = filename.split("_")[0]
+
+                    diff_map = diff_engine.compute_difference(curr_ndvi, prev_ndvi, date_str)
+                    if diff_map:
+                        processed_files.append(diff_map)
+
+            # GIF Generator
+            gif_gen = GifGenerator()
+            gif_path = gif_gen.generate_timelapse(job_id, bbox_list, processed_files)
+
+        except Exception as e:
+            print(f"Chronos Engine Warning: {e}")
+            # Don't fail the mission if Chronos fails
+
         # 3. Report (Reporting)
         report_name = f"Evidence_Pack_{job_id}.pdf"
         pdf_gen = PDFReportGenerator()
@@ -85,6 +120,9 @@ def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: 
             "processed_files": processed_files,
             "pdf_report": report_path
         }
+        if gif_path:
+             results["timelapse_gif"] = gif_path
+
         jm.update_job_status(job_id, "COMPLETED", results=results)
 
     except Exception as e:
