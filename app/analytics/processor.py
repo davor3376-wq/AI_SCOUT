@@ -89,22 +89,23 @@ def process_scene(filepath: str):
         ndvi[cloud_mask] = np.nan
 
         # Save NDVI
-        ndvi_path = save_result(ndvi, src.profile, date_str, "NDVI")
-        if ndvi_path:
-            generated_files.append(ndvi_path)
+        results = []
+        path = save_result(ndvi, src.profile, date_str, "NDVI")
+        if path:
+            results.append(path)
 
         # Calculate NDWI
         if green is not None:
             logger.info("Calculating NDWI...")
             ndwi = calculate_ndwi(green, nir)
             ndwi[cloud_mask] = np.nan
-            ndwi_path = save_result(ndwi, src.profile, date_str, "NDWI")
-            if ndwi_path:
-                generated_files.append(ndwi_path)
+            path = save_result(ndwi, src.profile, date_str, "NDWI")
+            if path:
+                results.append(path)
         else:
             logger.warning("Green band (B03) not available. Skipping NDWI calculation.")
 
-    return generated_files
+        return results
 
 def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
     """
