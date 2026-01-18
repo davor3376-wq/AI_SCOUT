@@ -86,16 +86,23 @@ def process_scene(filepath: str):
         ndvi[cloud_mask] = np.nan
 
         # Save NDVI
-        save_result(ndvi, src.profile, date_str, "NDVI")
+        results = []
+        path = save_result(ndvi, src.profile, date_str, "NDVI")
+        if path:
+            results.append(path)
 
         # Calculate NDWI
         if green is not None:
             logger.info("Calculating NDWI...")
             ndwi = calculate_ndwi(green, nir)
             ndwi[cloud_mask] = np.nan
-            save_result(ndwi, src.profile, date_str, "NDWI")
+            path = save_result(ndwi, src.profile, date_str, "NDWI")
+            if path:
+                results.append(path)
         else:
             logger.warning("Green band (B03) not available. Skipping NDWI calculation.")
+
+        return results
 
 def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
     """
@@ -126,8 +133,10 @@ def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
         with rasterio.open(output_path, 'w', **profile) as dst:
             dst.write(data.astype(rasterio.float32), 1)
         logger.info(f"Saved {index_name} to {output_path}")
+        return output_path
     except Exception as e:
         logger.error(f"Failed to save {output_path}: {e}")
+        return None
 
 def run():
     """

@@ -21,7 +21,7 @@ class PDFReportGenerator:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def generate_pdf(self, filename="report.pdf"):
+    def generate_pdf(self, filename="report.pdf", specific_files=None):
         output_path = os.path.join(self.output_dir, filename)
         c = canvas.Canvas(output_path, pagesize=letter)
         width, height = letter
@@ -36,7 +36,11 @@ class PDFReportGenerator:
         y_position = height - 120
 
         # Find TIF files
-        tif_files = glob.glob(os.path.join(self.input_dir, "*_NDVI_analysis.tif"))
+        if specific_files:
+            tif_files = specific_files
+        else:
+            tif_files = glob.glob(os.path.join(self.input_dir, "*_NDVI_analysis.tif"))
+
         if not tif_files:
             logger.warning("No NDVI files found to generate report.")
             c.drawString(50, y_position, "No data available.")
