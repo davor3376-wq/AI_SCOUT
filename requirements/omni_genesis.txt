@@ -1,0 +1,15 @@
+rasterio
+pystac
+fastapi
+uvicorn
+celery
+geopandas
+scikit-learn
+tensorflow
+shapely
+sentinelhub
+requests
+numpy
+pillow
+reportlab
+matplotlib

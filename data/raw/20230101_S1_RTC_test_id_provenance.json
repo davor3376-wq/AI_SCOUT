@@ -1,0 +1,17 @@
+{
+    "orbit_id": 123,
+    "acquisition_time": "2023-01-01T12:00:00Z",
+    "sensor": "S1_RTC",
+    "bbox": [
+        14.0,
+        45.0,
+        14.1,
+        45.1
+    ],
+    "item_id": "test_id",
+    "processing": {
+        "backCoeff": "GAMMA0_TERRAIN",
+        "orthorectify": true
+    },
+    "processing_timestamp": "2026-01-18T18:06:40.441624"
+}
