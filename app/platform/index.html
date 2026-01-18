@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Command Center V2</title>
+    <!-- Leaflet & Draw CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    <style>
+        body { margin: 0; padding: 0; display: flex; height: 100vh; font-family: sans-serif; }
+        #sidebar { width: 300px; background: #f4f4f4; padding: 20px; box-shadow: 2px 0 5px rgba(0,0,0,0.1); z-index: 1000; overflow-y: auto;}
+        #map { flex-grow: 1; height: 100%; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="date"] { width: 100%; padding: 8px; margin-bottom: 10px; }
+        button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; cursor: pointer; font-size: 16px; }
+        button:hover { background: #0056b3; }
+        #time-slider-container {
+            position: absolute; bottom: 30px; left: 320px; right: 20px;
+            background: rgba(255, 255, 255, 0.9); padding: 10px; border-radius: 5px; z-index: 1000;
+            display: none; /* Hidden until results */
+        }
+        #time-slider { width: 100%; }
+        #mission-status { margin-top: 20px; padding: 10px; border: 1px solid #ddd; background: #fff; min-height: 50px; }
+        .preview-img { max-width: 100%; margin-top: 10px; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>Mission Control</h2>
+
+    <div class="control-group">
+        <label>Date Range</label>
+        <input type="date" id="start-date">
+        <input type="date" id="end-date">
+    </div>
+
+    <div class="control-group">
+        <label>Sensor</label>
+        <div>
+            <input type="radio" id="sensor-optical" name="sensor" value="OPTICAL" checked>
+            <label for="sensor-optical" style="display:inline; font-weight:normal">Optical (Sentinel-2)</label>
+        </div>
+        <div>
+            <input type="radio" id="sensor-radar" name="sensor" value="RADAR">
+            <label for="sensor-radar" style="display:inline; font-weight:normal">Radar (Sentinel-1)</label>
+        </div>
+    </div>
+
+    <button id="launch-btn">Launch Mission</button>
+
+    <div id="mission-status">Status: Ready</div>
+</div>
+
+<div id="map"></div>
+
+<div id="time-slider-container">
+    <label for="time-slider">Time Scrubber</label>
+    <input type="range" id="time-slider" min="0" max="0" step="1" value="0">
+    <span id="current-date"></span>
+</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+    // Initialize Map
+    var map = L.map('map').setView([48.2, 16.35], 10); // Vienna default
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Initialize Draw Control
+    var drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+    var drawControl = new L.Control.Draw({
+        draw: {
+            polygon: true,
+            marker: true,
+            polyline: false,
+            rectangle: true,
+            circle: false,
+            circlemarker: false
+        },
+        edit: {
+            featureGroup: drawnItems
+        }
+    });
+    map.addControl(drawControl);
+
+    map.on(L.Draw.Event.CREATED, function (e) {
+        // Clear previous items for single AOI mission
+        drawnItems.clearLayers();
+        var layer = e.layer;
+        drawnItems.addLayer(layer);
+    });
+
+    // Default Dates (Last 30 days)
+    var today = new Date();
+    var lastMonth = new Date();
+    lastMonth.setDate(today.getDate() - 30);
+    document.getElementById('end-date').valueAsDate = today;
+    document.getElementById('start-date').valueAsDate = lastMonth;
+
+    // Launch Mission Logic
+    document.getElementById('launch-btn').addEventListener('click', async () => {
+        var startDate = document.getElementById('start-date').value;
+        var endDate = document.getElementById('end-date').value;
+        var sensor = document.querySelector('input[name="sensor"]:checked').value;
+
+        var layers = drawnItems.getLayers();
+        if (layers.length === 0) {
+            alert("Please draw an Area of Interest (AOI) on the map.");
+            return;
+        }
+        var geojson = layers[0].toGeoJSON();
+
+        var statusDiv = document.getElementById('mission-status');
+        statusDiv.innerHTML = "Status: Launching...";
+
+        try {
+            const response = await fetch('/launch_custom_mission', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    geometry: geojson.geometry,
+                    start_date: startDate,
+                    end_date: endDate,
+                    sensor: sensor
+                })
+            });
+
+            if (!response.ok) throw new Error("Mission Failed");
+
+            const result = await response.json();
+            statusDiv.innerHTML = `Status: Success!`;
+            if (result.tag) {
+                statusDiv.innerHTML += `<br>Tag: <b>${result.tag}</b>`;
+            }
+            if (result.tile_id) {
+                statusDiv.innerHTML += `<br>Tile ID: ${result.tile_id}`;
+            }
+            if (result.preview_url) {
+                 statusDiv.innerHTML += `<br><a href="${result.preview_url}" target="_blank">View Preview</a>`;
+            }
+
+            if (result.results && result.results.length > 0) {
+                setupTimeSlider(result.results);
+            } else if (result.preview_url) {
+                // If single result, put it in list for slider
+                setupTimeSlider([{date: result.date || "Unknown", url: result.preview_url}]);
+            }
+
+        } catch (error) {
+            statusDiv.innerHTML = `Status: Error - ${error.message}`;
+        }
+    });
+
+    var currentOverlay = null;
+
+    function setupTimeSlider(results) {
+        var slider = document.getElementById('time-slider');
+        var container = document.getElementById('time-slider-container');
+        var dateLabel = document.getElementById('current-date');
+
+        container.style.display = 'block';
+        slider.max = results.length - 1;
+        slider.value = 0;
+
+        var updateMap = (index) => {
+             var item = results[index];
+             dateLabel.innerText = item.date;
+
+             if (currentOverlay) {
+                 map.removeLayer(currentOverlay);
+             }
+
+             if (item.bbox && item.preview_url) {
+                 // item.bbox is [minx, miny, maxx, maxy]
+                 // LatLngBounds: [[miny, minx], [maxy, maxx]]
+                 var bounds = [[item.bbox[1], item.bbox[0]], [item.bbox[3], item.bbox[2]]];
+                 currentOverlay = L.imageOverlay(item.preview_url, bounds).addTo(map);
+                 // Optional: fit bounds to the image
+                 // map.fitBounds(bounds);
+             } else {
+                 console.log("No bbox or preview url for item", item);
+             }
+        };
+
+        slider.oninput = function() {
+            updateMap(this.value);
+        }
+
+        updateMap(0);
+    }
+</script>
+</body>
+</html>
