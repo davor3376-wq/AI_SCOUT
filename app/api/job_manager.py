@@ -40,10 +40,15 @@ class JobManager:
         job_id = f"JOB-{uuid.uuid4().hex[:8].upper()}"
         data = self._load()
 
+        # Handle recurrence if present in metadata
+        recurrence = metadata.get("recurrence")
+
         job = {
             "id": job_id,
             "status": "PENDING",
             "created_at": datetime.utcnow().isoformat(),
+            "recurrence": recurrence, # None, "DAILY", etc.
+            "last_run": None,
             **metadata,
             "results": {
                 "raw_files": [],
@@ -85,3 +90,9 @@ class JobManager:
             logger.info(f"Updated job {job_id} to {status}")
         else:
             logger.error(f"Job {job_id} not found for update.")
+
+    def update_last_run(self, job_id: str, last_run: datetime):
+        data = self._load()
+        if job_id in data["jobs"]:
+            data["jobs"][job_id]["last_run"] = last_run.isoformat()
+            self._save(data)

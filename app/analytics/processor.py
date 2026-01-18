@@ -10,7 +10,9 @@ import numpy as np
 from pathlib import Path
 
 from app.analytics.indices import calculate_ndvi, calculate_ndwi
-from app.analytics.masking import get_cloud_mask, calculate_cloud_coverage
+from app.analytics.masking import get_cloud_mask, get_cloud_mask_from_qa60, calculate_cloud_coverage
+from app.analytics.alerting import calculate_alert_level
+from app.reporting.notifications import send_alert_sync
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,33 +49,34 @@ def process_scene(filepath: str):
 
     with rasterio.open(filepath) as src:
         # Check band count
-        # We expect at least 3 bands: B04, B08, SCL
+        # We expect at least 3 bands for legacy, 5 for new (B03, B04, B08, SCL, QA60)
         if src.count < 3:
             logger.error(f"File {filename} has insufficient bands ({src.count}). Expected at least 3.")
             return []
 
         # Read bands
-        # Note: rasterio is 1-indexed
-        # Based on Ingestion Layer (s2_client.py):
-        # Band 1: B04 (Red)
-        # Band 2: B08 (NIR)
-        # Band 3: SCL
-
-        red = src.read(1)
-        nir = src.read(2)
-        scl = src.read(3)
-
-        # Check for Green band (B03) for NDWI
-        # If the file has 4 bands, we might assume band 4 is Green?
-        # But for now, the known ingestion only provides 3.
         green = None
-        if src.count >= 4:
-             # This is a hypothetical future proofing, checking if we can find it.
-             # But without a defined contract for >3 bands, we shouldn't guess.
-             pass
+        qa60 = None
+
+        if src.count >= 5:
+            # New format: B03, B04, B08, SCL, QA60
+            green = src.read(1)
+            red = src.read(2)
+            nir = src.read(3)
+            scl = src.read(4)
+            qa60 = src.read(5)
+        else:
+            # Legacy format: B04, B08, SCL
+            red = src.read(1)
+            nir = src.read(2)
+            scl = src.read(3)
 
         # Generate Cloud Mask
         cloud_mask = get_cloud_mask(scl)
+
+        if qa60 is not None:
+            qa60_mask = get_cloud_mask_from_qa60(qa60)
+            cloud_mask = cloud_mask | qa60_mask
         cloud_cover_pct = calculate_cloud_coverage(cloud_mask)
         logger.info(f"Cloud Cover: {cloud_cover_pct:.2f}%")
 
@@ -87,6 +90,12 @@ def process_scene(filepath: str):
 
         # Apply Mask (Set masked pixels to NaN)
         ndvi[cloud_mask] = np.nan
+
+        # Alert Logic
+        alert_level = calculate_alert_level(ndvi, cloud_cover_pct)
+        if alert_level == "HIGH":
+            logger.warning(f"HIGH ALERT DETECTED for {filename}. Sending notification.")
+            send_alert_sync(f"🚨 WATCHDOG ALERT 🚨\nFile: {filename}\nNDVI Mean: {np.nanmean(ndvi):.2f}\nCloud Cover: {cloud_cover_pct:.2f}%")
 
         # Save NDVI
         results = []

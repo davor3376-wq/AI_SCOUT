@@ -56,18 +56,23 @@ class S2Client:
         Returns:
             List of paths to downloaded files.
         """
-        # Evalscript for B04, B08, and SCL
+        # Evalscript for B03, B04, B08, SCL, and QA60
+        # B03: Green (for NDWI)
+        # B04: Red (for NDVI)
+        # B08: NIR (for NDVI/NDWI)
+        # SCL: Scene Classification Layer
+        # QA60: Quality Assurance band (for Cloud Masking)
         evalscript = """
         //VERSION=3
         function setup() {
           return {
-            input: ["B04", "B08", "SCL"],
-            output: { bands: 3, sampleType: "UINT16" }
+            input: ["B03", "B04", "B08", "SCL", "QA60"],
+            output: { bands: 5, sampleType: "UINT16" }
           };
         }
 
         function evaluatePixel(sample) {
-          return [sample.B04, sample.B08, sample.SCL];
+          return [sample.B03, sample.B04, sample.B08, sample.SCL, sample.QA60];
         }
         """
 
