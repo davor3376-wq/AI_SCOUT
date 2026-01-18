@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
+from fastapi import BackgroundTasks
 from app.api.main import app, launch_mission, MissionRequest
 
 class TestMissionLogic(unittest.IsolatedAsyncioTestCase):
@@ -28,9 +29,13 @@ class TestMissionLogic(unittest.IsolatedAsyncioTestCase):
             sensor="OPTICAL"
         )
 
-        response = await launch_mission(request)
+        # Mock BackgroundTasks
+        mock_bg_tasks = MagicMock(spec=BackgroundTasks)
+
+        response = await launch_mission(request, mock_bg_tasks)
 
         self.assertEqual(response["tile_id"], "S2_TILE_1")
+        self.assertIn("job_id", response) # New assertion
         self.assertIsNone(response.get("tag"))
         self.assertEqual(response["preview_url"], "http://preview/s2")
 
@@ -87,7 +92,10 @@ class TestMissionLogic(unittest.IsolatedAsyncioTestCase):
             sensor="OPTICAL"
         )
 
-        response = await launch_mission(request)
+        # Mock BackgroundTasks
+        mock_bg_tasks = MagicMock(spec=BackgroundTasks)
+
+        response = await launch_mission(request, mock_bg_tasks)
 
         self.assertEqual(response["tile_id"], "S1_RADAR")
         self.assertEqual(response["tag"], "CLOUD_PIERCED")
@@ -116,7 +124,10 @@ class TestMissionLogic(unittest.IsolatedAsyncioTestCase):
             sensor="RADAR"
         )
 
-        response = await launch_mission(request)
+        # Mock BackgroundTasks
+        mock_bg_tasks = MagicMock(spec=BackgroundTasks)
+
+        response = await launch_mission(request, mock_bg_tasks)
 
         self.assertEqual(response["tile_id"], "S1_POINT")
         self.assertEqual(response.get("bbox"), [16.2, 48.1, 16.5, 48.3])

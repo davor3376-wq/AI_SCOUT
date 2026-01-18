@@ -3,7 +3,9 @@ import io
 import glob
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response, BackgroundTasks
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentinelhub import SentinelHubCatalog, BBox, CRS, DataCollection
@@ -18,9 +20,14 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
+from app.api.job_manager import JobManager
+from app.ingestion.s2_client import S2Client
+from app.analytics import processor
+from app.reporting.pdf_gen import PDFReportGenerator
+
 app = FastAPI()
 
-# Add CORS to be safe
+# Add CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,17 +42,67 @@ class MissionRequest(BaseModel):
     end_date: str
     sensor: str # "OPTICAL" or "RADAR"
 
+def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: str):
+    """
+    Background task to execute the mission pipeline.
+    """
+    jm = JobManager()
+    jm.update_job_status(job_id, "RUNNING")
+
+    try:
+        # 1. Download (Ingestion)
+        raw_files = []
+        if sensor == "OPTICAL":
+            client = S2Client()
+            # download_data is blocking
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+        else:
+            # Placeholder for RADAR or other sensors
+            pass
+
+        if not raw_files:
+            jm.update_job_status(job_id, "FAILED", error="No data downloaded (or sensor not supported for processing)")
+            return
+
+        # 2. Process (Analytics)
+        processed_files = processor.run(input_files=raw_files)
+
+        if not processed_files:
+             jm.update_job_status(job_id, "FAILED", error="No data processed (Analytics produced no output)")
+             return
+
+        # 3. Report (Reporting)
+        report_name = f"Evidence_Pack_{job_id}.pdf"
+        pdf_gen = PDFReportGenerator()
+        # generate_pdf is blocking
+        pdf_gen.generate_pdf(filename=report_name, specific_files=processed_files)
+
+        report_path = os.path.join("results", report_name)
+
+        # 4. Finish
+        results = {
+            "raw_files": raw_files,
+            "processed_files": processed_files,
+            "pdf_report": report_path
+        }
+        jm.update_job_status(job_id, "COMPLETED", results=results)
+
+    except Exception as e:
+        print(f"Job {job_id} failed: {e}")
+        jm.update_job_status(job_id, "FAILED", error=str(e))
+
+
 @app.post("/launch_custom_mission")
-async def launch_mission(request: MissionRequest):
+async def launch_mission(request: MissionRequest, background_tasks: BackgroundTasks):
     auth = SentinelHubAuth()
     catalog = SentinelHubCatalog(config=auth.config)
 
-    # Geometry parsing (Polygon or Point)
+    # Geometry parsing
     try:
         geom_type = request.geometry.get('type')
         if geom_type == 'Point':
             lon, lat = request.geometry['coordinates']
-            delta = 0.05  # Approx 5km buffer
+            delta = 0.05
             bbox = BBox(bbox=[lon - delta, lat - delta, lon + delta, lat + delta], crs=CRS.WGS84)
         elif geom_type == 'Polygon':
             coords = request.geometry['coordinates'][0]
@@ -60,11 +117,12 @@ async def launch_mission(request: MissionRequest):
         raise HTTPException(status_code=400, detail="Invalid geometry structure")
 
     time_interval = (request.start_date, request.end_date)
-
     sensor = request.sensor
     tag = None
-
     results = []
+
+    # 1. Quick Search (Metadata only)
+    search_results = {}
 
     # OPTICAL LOGIC
     if sensor == "OPTICAL":
@@ -72,8 +130,6 @@ async def launch_mission(request: MissionRequest):
             "CDSE_S2_L2A",
             service_url="https://sh.dataspace.copernicus.eu"
         )
-
-        # Search for items
         try:
             search_iterator = catalog.search(
                 collection=s2_collection,
@@ -87,7 +143,6 @@ async def launch_mission(request: MissionRequest):
             items = []
 
         if items:
-            # Sort by date descending
             items.sort(key=lambda x: x['datetime'], reverse=True)
             latest_item = items[0]
             cloud_cover = latest_item['properties'].get('eo:cloud_cover', 100)
@@ -96,30 +151,26 @@ async def launch_mission(request: MissionRequest):
                 sensor = "RADAR"
                 tag = "CLOUD_PIERCED"
             else:
-                # Prepare results
                 for item in items:
                     assets = item.get('assets', {})
                     preview = assets.get('thumbnail', {}).get('href') or assets.get('visual', {}).get('href')
-
                     results.append({
                         "tile_id": item["id"],
                         "date": item["datetime"],
                         "preview_url": preview,
                         "bbox": item.get("bbox")
                     })
-
-                return {
+                search_results = {
                     "tile_id": latest_item["id"],
                     "preview_url": results[0]["preview_url"],
                     "results": results,
                     "bbox": latest_item.get("bbox")
                 }
         else:
-             # No optical data found, try radar
              sensor = "RADAR"
              tag = "NO_OPTICAL_DATA"
 
-    # RADAR LOGIC (Fallback or Primary)
+    # RADAR LOGIC
     if sensor == "RADAR":
         try:
             search_iterator = catalog.search(
@@ -133,42 +184,111 @@ async def launch_mission(request: MissionRequest):
             print(f"S1 Search Error: {e}")
             items = []
 
-        if not items:
-            raise HTTPException(status_code=404, detail="No data found for the given criteria.")
+        if items:
+            items.sort(key=lambda x: x['datetime'], reverse=True)
+            for item in items:
+                assets = item.get('assets', {})
+                preview = assets.get('thumbnail', {}).get('href')
+                results.append({
+                    "tile_id": item["id"],
+                    "date": item["datetime"],
+                    "preview_url": preview,
+                    "bbox": item.get("bbox")
+                })
+            search_results = {
+                "tile_id": items[0]["id"],
+                "preview_url": results[0]["preview_url"],
+                "tag": tag,
+                "results": results,
+                "bbox": items[0].get("bbox")
+            }
+        else:
+            pass
 
-        items.sort(key=lambda x: x['datetime'], reverse=True)
+    if not search_results and not results:
+         raise HTTPException(status_code=404, detail="No data found for the given criteria.")
 
-        for item in items:
-            assets = item.get('assets', {})
-            preview = assets.get('thumbnail', {}).get('href')
-            results.append({
-                "tile_id": item["id"],
-                "date": item["datetime"],
-                "preview_url": preview,
-                "bbox": item.get("bbox")
-            })
+    # 2. Create Job
+    jm = JobManager()
 
-        return {
-            "tile_id": items[0]["id"],
-            "preview_url": results[0]["preview_url"],
-            "tag": tag,
-            "results": results,
-            "bbox": items[0].get("bbox")
-        }
+    # Store bbox as list for JSON serialization
+    bbox_list = [bbox.lower_left[0], bbox.lower_left[1], bbox.upper_right[0], bbox.upper_right[1]]
 
+    job_metadata = {
+        "sensor": sensor,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+        "bbox": bbox_list,
+        "preview_url": search_results.get("preview_url"),
+        "search_results": search_results, # Store full search results
+        "tag": tag
+    }
+
+    job_id = jm.create_job(job_metadata)
+
+    # 3. Schedule Processing
+    background_tasks.add_task(process_mission_task, job_id, bbox, time_interval, sensor)
+
+    # 4. Return
+    response = search_results.copy()
+    response["job_id"] = job_id
+    response["status"] = "PENDING"
+    return response
+
+@app.get("/jobs")
+async def list_jobs():
+    jm = JobManager()
+    return jm.list_jobs()
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    jm = JobManager()
+    job = jm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+@app.get("/jobs/{job_id}/pdf")
+async def download_pdf(job_id: str):
+    jm = JobManager()
+    job = jm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] != "COMPLETED":
+        raise HTTPException(status_code=400, detail="Job not complete")
+
+    pdf_path = job.get("results", {}).get("pdf_report")
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=404, detail="PDF Report not found")
+
+    return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
 
 @app.get("/tiles/{z}/{x}/{y}")
-async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
+async def get_tile(z: int, x: int, y: int, file: Optional[str] = None, job_id: Optional[str] = None):
     """
-    Serves a 256x256 PNG tile for the requested Web Mercator tile (z, x, y).
-    Looks for the latest .tif in results/ or data/processed/.
+    Serves a 256x256 PNG tile.
+    Can specify `file` directly OR `job_id`.
+    If `job_id` is specified, it uses the latest processed file from that job.
     """
-
-    # Locate the TIF file
     tif_path = None
 
-    if file:
-        # Check explicit path in both dirs
+    if job_id:
+        jm = JobManager()
+        job = jm.get_job(job_id)
+        if job and job.get("status") == "COMPLETED":
+            processed = job.get("results", {}).get("processed_files", [])
+            if processed:
+                ndvi_files = [p for p in processed if "NDVI" in p]
+                if ndvi_files:
+                    tif_path = ndvi_files[0]
+                else:
+                    tif_path = processed[0]
+
+        if not tif_path:
+             pass
+
+    if not tif_path and file:
         safe_filename = os.path.basename(file)
         p1 = os.path.join("results", safe_filename)
         p2 = os.path.join("data", "processed", safe_filename)
@@ -176,8 +296,9 @@ async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
             tif_path = p1
         elif os.path.exists(p2):
             tif_path = p2
-    else:
-        # Find latest TIF
+
+    if not tif_path and not job_id and not file:
+        # Latest global logic (Legacy)
         search_paths = [
             os.path.join("results", "*.tif"),
             os.path.join("data", "processed", "*.tif")
@@ -185,30 +306,27 @@ async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
         candidates = []
         for sp in search_paths:
             candidates.extend(glob.glob(sp))
-
         if candidates:
-            # Sort by modification time
             candidates.sort(key=os.path.getmtime, reverse=True)
             tif_path = candidates[0]
 
     if not tif_path:
-        # Return empty/transparent tile if no data found?
-        # Or 404. 404 is better for debugging.
-        raise HTTPException(status_code=404, detail="No processed data found.")
+        # Return transparent if nothing found
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return Response(content=buf.getvalue(), media_type="image/png")
 
-    # Calculate tile bounds in EPSG:3857
+    # Render Tile
     bounds = mercantile.xy_bounds(x, y, z)
     left, bottom, right, top = bounds.left, bounds.bottom, bounds.right, bounds.top
 
     try:
         with rasterio.open(tif_path) as src:
-            # Prepare destination
             dst_transform = from_bounds(left, bottom, right, top, 256, 256)
             dst_crs = 'EPSG:3857'
-
             data = np.full((src.count, 256, 256), np.nan, dtype=np.float32)
 
-            # Reproject
             for i in range(src.count):
                 reproject(
                     source=rasterio.band(src, i+1),
@@ -220,58 +338,35 @@ async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
                     resampling=Resampling.bilinear
                 )
 
-            # If all data is NaN/nodata, return empty tile
             if np.all(np.isnan(data)):
-                # Return transparent PNG
                 img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
                 buf = io.BytesIO()
                 img.save(buf, format='PNG')
                 return Response(content=buf.getvalue(), media_type="image/png")
 
-            # Visualization Logic
-            # If 1 band, apply colormap
+            # Visualization
             if data.shape[0] == 1:
                 band = data[0]
-                # Normalize or clip? NDVI is -1 to 1.
-                # 'RdYlGn' colormap
-                # Normalize -1 to 1 to 0-1 for colormap
-                # But NDVI usually 0 to 1 for vegetation, <0 water/snow
-
                 norm = plt.Normalize(vmin=-0.2, vmax=1.0)
                 cmap = plt.get_cmap('RdYlGn')
-
-                # Apply colormap
-                colored = cmap(norm(band)) # Returns (256, 256, 4) float
-
-                # Handle NaNs (transparency)
+                colored = cmap(norm(band))
                 mask = np.isnan(band)
-                colored[mask] = [0, 0, 0, 0] # Transparent
-
-                # Convert to UINT8
+                colored[mask] = [0, 0, 0, 0]
                 img_data = (colored * 255).astype(np.uint8)
                 img = Image.fromarray(img_data, 'RGBA')
 
             elif data.shape[0] >= 3:
-                # RGB
                 img_data = np.moveaxis(data[:3], 0, -1)
-
-                # Check range and normalize if necessary
-                # If data is float (it is, per initialization) and values are small (<=1.0), scale them.
                 max_val = np.nanmax(img_data)
                 if max_val is not None and max_val <= 1.5:
                      img_data = np.clip(img_data, 0.0, 1.0) * 255
-
                 img_data = np.nan_to_num(img_data).astype(np.uint8)
-
-                # Add alpha channel for transparency of [0,0,0] pixels
                 alpha = np.full((256, 256), 255, dtype=np.uint8)
                 mask = np.all(img_data == 0, axis=2)
                 alpha[mask] = 0
-
                 img_rgba = np.dstack((img_data, alpha))
                 img = Image.fromarray(img_rgba, 'RGBA')
             else:
-                # Fallback
                  img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
 
             buf = io.BytesIO()
@@ -280,9 +375,10 @@ async def get_tile(z: int, x: int, y: int, file: Optional[str] = None):
 
     except Exception as e:
         print(f"Tile Error: {e}")
-        # Return transparent on error or 500?
-        # Better transparent to not break map
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         return Response(content=buf.getvalue(), media_type="image/png")
+
+# Mount Static Files (Must be last to avoid overriding API routes)
+app.mount("/", StaticFiles(directory="app/platform", html=True), name="platform")
