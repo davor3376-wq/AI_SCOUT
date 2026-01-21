@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple, Union, List
 
 from app.ingestion.s2_client import S2Client
-from app.ingestion.sentinel1_rtc import S1RTCClient
 from app.analytics import processor
 from app.reporting.pdf_gen import PDFReportGenerator
 from app.reporting.integrity import IntegrityChecker
@@ -18,14 +17,13 @@ logger = logging.getLogger(__name__)
 
 async def main(
     bbox: Optional[BBox] = None,
-    time_interval: Optional[Tuple[Union[str, datetime], Union[str, datetime]]] = None,
-    mission_type: str = "NDVI"
+    time_interval: Optional[Tuple[Union[str, datetime], Union[str, datetime]]] = None
 ) -> List[str]:
     """
     Executes the mission for a given BBox and time interval.
-    Returns a list of generated analysis files.
+    Returns a list of generated analysis files (NDVI TIFs).
     """
-    logger.info(f"Starting Squad Gamma Mission ({mission_type})...")
+    logger.info("Starting Squad Gamma Mission...")
 
     # Default BBox (Vienna) if not provided
     if bbox is None:
@@ -40,13 +38,9 @@ async def main(
 
     # --- Role 14: Coordinator ---
 
-    # 1. Ingestion
+    # 1. Ingestion (Role 3 S2Client)
     logger.info("--- Step 1: Checking for new data (Ingestion) ---")
-
-    if mission_type in ["S1_RTC", "RADAR"]:
-        client = S1RTCClient()
-    else:
-        client = S2Client()
+    client = S2Client()
 
     downloaded_files = []
     try:
@@ -70,21 +64,9 @@ async def main(
     # 2. Analytics (Role 6/8 Processor)
     logger.info("--- Step 2: Processing Analytics ---")
     processed_files = []
-
-    requested_indices = None
-    if mission_type == "NDVI":
-        requested_indices = ["NDVI"]
-    elif mission_type == "NDWI":
-        requested_indices = ["NDWI"]
-    elif mission_type == "NBR":
-        requested_indices = ["NBR"]
-    elif mission_type == "OPTICAL":
-        requested_indices = ["NDVI", "NDWI", "NBR"]
-    # For RADAR/S1_RTC, requested_indices remains None or empty list implies no analytics
-
     try:
         # Pass the specific files we just downloaded
-        processed_files = processor.run(input_files=downloaded_files, requested_indices=requested_indices)
+        processed_files = processor.run(input_files=downloaded_files)
         logger.info(f"Generated {len(processed_files)} analysis files.")
     except Exception as e:
         logger.error(f"Analytics failed: {e}")
