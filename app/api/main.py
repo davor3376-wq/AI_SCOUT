@@ -23,8 +23,12 @@ import matplotlib.colors as mcolors
 import asyncio
 from app.api.job_manager import JobManager
 from app.ingestion.s2_client import S2Client
-from app.core.mission_executor import process_mission_task
-from app.core.scheduler import MissionScheduler
+from app.ingestion.sentinel1_rtc import S1RTCClient
+from app.analytics import processor
+from app.analytics.chronos import AutoDifferencing, GifGenerator
+from app.reporting.pdf_gen import PDFReportGenerator
+from app.reporting.kml_gen import generate_kml
+from app.reporting.summary_gen import generate_mobile_summary
 
 app = FastAPI()
 scheduler = MissionScheduler()
@@ -50,8 +54,121 @@ class MissionRequest(BaseModel):
     geometry: Dict[str, Any]
     start_date: str
     end_date: str
-    sensor: str # "OPTICAL" or "RADAR"
-    recurrence: Optional[str] = None # "DAILY"
+    sensor: str # "OPTICAL", "RADAR", "NDVI", "NDWI", "NBR"
+
+def process_mission_task(job_id: str, bbox: BBox, time_interval: tuple, sensor: str):
+    """
+    Background task to execute the mission pipeline.
+    """
+    jm = JobManager()
+    jm.update_job_status(job_id, "RUNNING")
+
+    try:
+        # 1. Download (Ingestion)
+        raw_files = []
+        requested_indices = None
+
+        # Determine ingestion client and requested indices
+        if sensor in ["OPTICAL", "NDVI", "NDWI", "NBR"]:
+            client = S2Client()
+            # download_data is blocking
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+
+            # If sensor implies a specific index, set requested_indices
+            if sensor == "OPTICAL":
+                requested_indices = ["NDVI", "NDWI", "NBR"] # All
+            else:
+                requested_indices = [sensor]
+
+        elif sensor == "RADAR" or sensor == "S1_RTC":
+            client = S1RTCClient()
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+            requested_indices = [] # No analytics for S1 yet
+
+        else:
+            # Default to S2 if unknown
+            client = S2Client()
+            raw_files = client.download_data(bbox=bbox, time_interval=time_interval)
+            requested_indices = ["NDVI"]
+
+        if not raw_files:
+            jm.update_job_status(job_id, "FAILED", error="No data downloaded (or sensor not supported for processing)")
+            return
+
+        # 2. Process (Analytics)
+        # S1 files are just passed through as 'processed' effectively in the current processor logic if we pass them
+        processed_files = processor.run(input_files=raw_files, requested_indices=requested_indices)
+
+        if not processed_files:
+             jm.update_job_status(job_id, "FAILED", error="No data processed (Analytics produced no output)")
+             return
+
+        # --- CHRONOS ENGINE UPGRADE ---
+        gif_path = None
+        try:
+            # Auto-Differencing
+            diff_engine = AutoDifferencing()
+            # Convert BBox to list for comparison
+            bbox_list = [bbox.lower_left[0], bbox.lower_left[1], bbox.upper_right[0], bbox.upper_right[1]]
+
+            previous_job = diff_engine.find_previous_job(job_id, bbox_list, sensor)
+
+            if previous_job:
+                # Find NDVI files
+                prev_files = previous_job.get("results", {}).get("processed_files", [])
+                prev_ndvi = next((f for f in prev_files if "NDVI" in f), None)
+
+                curr_ndvi = next((f for f in processed_files if "NDVI" in f), None)
+
+                if prev_ndvi and curr_ndvi and os.path.exists(prev_ndvi):
+                    # Get date string from current file
+                    filename = os.path.basename(curr_ndvi)
+                    date_str = filename.split("_")[0]
+
+                    diff_map = diff_engine.compute_difference(curr_ndvi, prev_ndvi, date_str)
+                    if diff_map:
+                        processed_files.append(diff_map)
+
+            # GIF Generator
+            gif_gen = GifGenerator()
+            gif_path = gif_gen.generate_timelapse(job_id, bbox_list, processed_files)
+
+        except Exception as e:
+            print(f"Chronos Engine Warning: {e}")
+            # Don't fail the mission if Chronos fails
+
+        # 3. Report (Reporting)
+        # KML
+        kml_path = generate_kml(job_id, bbox, output_dir="results")
+
+        # Mobile Summary
+        mobile_summary_path = generate_mobile_summary(processed_files, output_dir="results", job_id=job_id)
+
+        # PDF
+        report_name = f"Evidence_Pack_{job_id}.pdf"
+        pdf_gen = PDFReportGenerator()
+        # generate_pdf is blocking
+        pdf_gen.generate_pdf(filename=report_name, specific_files=processed_files, bbox=bbox)
+
+        report_path = os.path.join("results", report_name)
+
+        # 4. Finish
+        results = {
+            "raw_files": raw_files,
+            "processed_files": processed_files,
+            "pdf_report": report_path,
+            "kml_export": kml_path,
+            "mobile_summary": mobile_summary_path
+        }
+        if gif_path:
+             results["timelapse_gif"] = gif_path
+
+        jm.update_job_status(job_id, "COMPLETED", results=results)
+
+    except Exception as e:
+        print(f"Job {job_id} failed: {e}")
+        jm.update_job_status(job_id, "FAILED", error=str(e))
+
 
 @app.post("/launch_custom_mission")
 async def launch_mission(request: MissionRequest, background_tasks: BackgroundTasks):

@@ -10,6 +10,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 from PIL import Image
 import io
+import qrcode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,7 +22,7 @@ class PDFReportGenerator:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def generate_pdf(self, filename="report.pdf", specific_files=None):
+    def generate_pdf(self, filename="report.pdf", specific_files=None, bbox=None):
         output_path = os.path.join(self.output_dir, filename)
         c = canvas.Canvas(output_path, pagesize=letter)
         width, height = letter
@@ -32,6 +33,49 @@ class PDFReportGenerator:
 
         c.setFont("Helvetica", 12)
         c.drawString(50, height - 80, "Analysis & Evidence Pack")
+
+        # QR Code Generation
+        if bbox:
+            try:
+                # Calculate center
+                # BBox is iterable [minx, miny, maxx, maxy] or object with properties
+                if hasattr(bbox, 'lower_left'): # sentinelhub.BBox object
+                    minx, miny = bbox.lower_left
+                    maxx, maxy = bbox.upper_right
+                else: # list/tuple
+                     minx, miny, maxx, maxy = bbox[0], bbox[1], bbox[2], bbox[3]
+
+                center_lat = (miny + maxy) / 2
+                center_lon = (minx + maxx) / 2
+
+                # Geo URI
+                qr_data = f"geo:{center_lat},{center_lon}?q={center_lat},{center_lon}(Mission Center)"
+
+                qr = qrcode.QRCode(
+                    version=1,
+                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    box_size=10,
+                    border=4,
+                )
+                qr.add_data(qr_data)
+                qr.make(fit=True)
+
+                qr_img = qr.make_image(fill_color="black", back_color="white")
+
+                # Save QR to buffer
+                qr_buffer = io.BytesIO()
+                qr_img.save(qr_buffer, format="PNG")
+                qr_buffer.seek(0)
+
+                # Draw QR code in footer
+                qr_size = 80
+                c.drawImage(ImageReader(qr_buffer), width - qr_size - 50, 50, width=qr_size, height=qr_size)
+
+                c.setFont("Helvetica", 8)
+                c.drawString(width - qr_size - 50, 40, "Navigation Scan")
+
+            except Exception as e:
+                logger.error(f"Failed to generate QR code: {e}")
 
         y_position = height - 120
 
