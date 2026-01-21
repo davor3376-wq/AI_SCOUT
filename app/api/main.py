@@ -343,6 +343,28 @@ async def download_pdf(job_id: str):
 
     return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
 
+@app.get("/stac")
+async def get_stac_catalog():
+    """
+    Returns the root STAC Catalog.
+    """
+    catalog_path = "data/stac_catalog/catalog.json"
+    if not os.path.exists(catalog_path):
+        raise HTTPException(status_code=404, detail="STAC Catalog not found.")
+    return FileResponse(catalog_path, media_type="application/json")
+
+@app.get("/stac/{item_id}")
+async def get_stac_item(item_id: str):
+    """
+    Returns a specific STAC Item.
+    """
+    # Assuming flat structure for now or search
+    # Helper to find item file
+    item_path = os.path.join("data/stac_catalog", item_id, f"{item_id}.json")
+    if not os.path.exists(item_path):
+         raise HTTPException(status_code=404, detail="STAC Item not found.")
+    return FileResponse(item_path, media_type="application/json")
+
 @app.get("/tiles/{z}/{x}/{y}")
 async def get_tile(z: int, x: int, y: int, file: Optional[str] = None, job_id: Optional[str] = None):
     """

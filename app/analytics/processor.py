@@ -9,8 +9,10 @@ import rasterio
 import numpy as np
 from pathlib import Path
 
-from app.analytics.indices import calculate_ndvi, calculate_ndwi, calculate_nbr
-from app.analytics.masking import get_cloud_mask, calculate_cloud_coverage
+from app.analytics.indices import calculate_ndvi, calculate_ndwi
+from app.analytics.masking import get_cloud_mask, get_cloud_mask_from_qa60, calculate_cloud_coverage
+from app.analytics.alerting import calculate_alert_level
+from app.reporting.notifications import send_alert_sync
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,10 +21,10 @@ logger = logging.getLogger(__name__)
 INPUT_DIR = "data/raw"
 OUTPUT_DIR = "data/processed"
 
-def process_scene(filepath: str, requested_indices=None):
+def process_scene(filepath: str):
     """
     Processes a single raw Sentinel-2 TIF file.
-    Calculates NDVI, NDWI, NBR if possible and requested.
+    Calculates NDVI (and NDWI if possible) and saves the results.
     Returns a list of generated output file paths.
     """
     filename = os.path.basename(filepath)
@@ -36,12 +38,6 @@ def process_scene(filepath: str, requested_indices=None):
     date_str = parts[0]
     sensor = parts[1]
     # tile_id = parts[2] # Unused for now
-
-    if sensor == "S1_RTC":
-        logger.info(f"Skipping analytics for S1_RTC file (Radar): {filename}")
-        # Could potentially just move it to processed or do something else
-        # For now, we return it as is if we want it to be part of the result set
-        return [filepath]
 
     if sensor != "S2":
         logger.info(f"Skipping non-S2 file: {filename}")
@@ -59,25 +55,21 @@ def process_scene(filepath: str, requested_indices=None):
             return []
 
         # Read bands
-        # Note: rasterio is 1-indexed
-        # Updated Ingestion Layer (s2_client.py) produces 5 bands:
-        # Band 1: B04 (Red)
-        # Band 2: B08 (NIR)
-        # Band 3: SCL
-        # Band 4: B03 (Green)
-        # Band 5: B12 (SWIR)
-
-        red = src.read(1)
-        nir = src.read(2)
-        scl = src.read(3)
-
         green = None
-        swir = None
+        qa60 = None
 
-        if src.count >= 4:
-            green = src.read(4)
         if src.count >= 5:
-            swir = src.read(5)
+            # New format: B03, B04, B08, SCL, QA60
+            green = src.read(1)
+            red = src.read(2)
+            nir = src.read(3)
+            scl = src.read(4)
+            qa60 = src.read(5)
+        else:
+            # Legacy format: B04, B08, SCL
+            red = src.read(1)
+            nir = src.read(2)
+            scl = src.read(3)
 
         # Generate Cloud Mask
         cloud_mask = get_cloud_mask(scl)
@@ -92,45 +84,35 @@ def process_scene(filepath: str, requested_indices=None):
             logger.warning(f"High cloud cover detected ({cloud_cover_pct:.2f}%). Data flagged as Low Confidence.")
             # In a real system, we might update metadata here.
 
-        # Determine indices to calculate
-        # If requested_indices is None, calculate all possible
-        if requested_indices is None:
-            requested_indices = ["NDVI", "NDWI", "NBR"]
-
-        results = []
-
         # Calculate NDVI
-        if "NDVI" in requested_indices:
-            logger.info("Calculating NDVI...")
-            ndvi = calculate_ndvi(red, nir)
-            ndvi[cloud_mask] = np.nan
-            path = save_result(ndvi, src.profile, date_str, "NDVI")
-            if path:
-                results.append(path)
+        logger.info("Calculating NDVI...")
+        ndvi = calculate_ndvi(red, nir)
+
+        # Apply Mask (Set masked pixels to NaN)
+        ndvi[cloud_mask] = np.nan
+
+        # Alert Logic
+        alert_level = calculate_alert_level(ndvi, cloud_cover_pct)
+        if alert_level == "HIGH":
+            logger.warning(f"HIGH ALERT DETECTED for {filename}. Sending notification.")
+            send_alert_sync(f"🚨 WATCHDOG ALERT 🚨\nFile: {filename}\nNDVI Mean: {np.nanmean(ndvi):.2f}\nCloud Cover: {cloud_cover_pct:.2f}%")
+
+        # Save NDVI
+        results = []
+        path = save_result(ndvi, src.profile, date_str, "NDVI")
+        if path:
+            results.append(path)
 
         # Calculate NDWI
-        if "NDWI" in requested_indices:
-            if green is not None:
-                logger.info("Calculating NDWI...")
-                ndwi = calculate_ndwi(green, nir)
-                ndwi[cloud_mask] = np.nan
-                path = save_result(ndwi, src.profile, date_str, "NDWI")
-                if path:
-                    results.append(path)
-            else:
-                logger.warning("Green band (B03) not available. Skipping NDWI calculation.")
-
-        # Calculate NBR
-        if "NBR" in requested_indices:
-            if swir is not None:
-                logger.info("Calculating NBR...")
-                nbr = calculate_nbr(nir, swir)
-                nbr[cloud_mask] = np.nan
-                path = save_result(nbr, src.profile, date_str, "NBR")
-                if path:
-                    results.append(path)
-            else:
-                logger.warning("SWIR band (B12) not available. Skipping NBR calculation.")
+        if green is not None:
+            logger.info("Calculating NDWI...")
+            ndwi = calculate_ndwi(green, nir)
+            ndwi[cloud_mask] = np.nan
+            path = save_result(ndwi, src.profile, date_str, "NDWI")
+            if path:
+                results.append(path)
+        else:
+            logger.warning("Green band (B03) not available. Skipping NDWI calculation.")
 
         return results
 
@@ -169,13 +151,12 @@ def save_result(data: np.ndarray, profile, date_str: str, index_name: str):
         logger.error(f"Failed to save {output_path}: {e}")
         return None
 
-def run(input_files=None, requested_indices=None):
+def run(input_files=None):
     """
     Main entry point to process files.
     Args:
         input_files (list): Optional list of specific file paths to process.
                             If None, processes all .tif files in data/raw.
-        requested_indices (list): Optional list of indices to calculate (e.g., ["NDVI", "NBR"]).
     Returns:
         list: List of paths to the processed output files.
     """
@@ -191,7 +172,7 @@ def run(input_files=None, requested_indices=None):
 
     output_files = []
     for filepath in input_files:
-        result = process_scene(filepath, requested_indices=requested_indices)
+        result = process_scene(filepath)
         if result:
             output_files.extend(result)
 
